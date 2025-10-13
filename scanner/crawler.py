@@ -165,6 +165,6 @@ class Crawler:
         await queue.join()
         for w in workers:
             w.cancel()
-        with contextlib.suppress(Exception):
-            await asyncio.gather(*workers)
+        # Ensure cancelled workers are awaited to avoid bubbling CancelledError
+        await asyncio.gather(*workers, return_exceptions=True)
         return seen

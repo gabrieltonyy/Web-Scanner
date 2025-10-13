@@ -55,9 +55,11 @@ async def check_reflected_xss(url: str, client: httpx.AsyncClient, https: bool =
                     request=HTTPRequest(method="GET", url=test_url, headers={}, body=None, redacted=True),
                     response=HTTPResponse(status=r.status_code, headers=dict(r.headers), body_excerpt=None),
                     evidence=Evidence(type="reflection", value=marker, match_context=context, signature=marker),
-                    remediation="Properly encode untrusted input in HTML context (e.g., escape <, >, ", ', /). Consider using a templating engine with autoescaping and Content-Security-Policy.",
+                    remediation=(
+                        "Properly encode untrusted input in HTML (escape <, >, \", ', /). "
+                        "Use template autoescaping and a strict Content-Security-Policy."
+                    ),
                     references=["https://owasp.org/www-community/attacks/xss/"]
                 )
             )
     return findings
-

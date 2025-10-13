@@ -16,8 +16,11 @@ from .checks.cookies import check_cookie_flags
 from .checks.tls import check_tls_version
 from .checks.xss import check_reflected_xss
 from .checks.sqli import check_sqli
+from .checks.csrf import check_csrf_forms
 from .models import Finding
 from .utils import dedupe_findings
+from reporting.engines import PDFRenderer
+from jinja2 import Environment, FileSystemLoader
 
 
 class Orchestrator:
@@ -52,6 +55,9 @@ class Orchestrator:
         findings.extend(check_cookie_flags(url, hdrs, https=url.startswith("https://")))
         if url.startswith("https://"):
             findings.extend(check_tls_version(url, hdrs))
+        ctype = hdrs.get("content-type", "").lower()
+        if "html" in ctype and r.text:
+            findings.extend(check_csrf_forms(url, r.text, hdrs))
         return findings
 
     async def active_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
@@ -77,7 +83,14 @@ class Orchestrator:
 
         deduped = dedupe_findings(findings)
         artifact_dir = self._write_artifacts(urls, deduped)
-        return {"artifact_dir": artifact_dir, "url_count": len(urls), "findings_count": len(deduped)}
+        report_paths = self._render_report(artifact_dir, deduped)
+        return {
+            "artifact_dir": artifact_dir,
+            "report": report_paths,
+            "url_count": len(urls),
+            "findings_count": len(deduped),
+            "findings": deduped,
+        }
 
     def _write_artifacts(self, urls: Set[str], findings: List[Finding]) -> str:
         ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -86,12 +99,32 @@ class Orchestrator:
         with open(os.path.join(outdir, "crawl.json"), "w", encoding="utf-8") as f:
             json.dump(sorted(list(urls)), f, indent=2)
         with open(os.path.join(outdir, "findings.json"), "w", encoding="utf-8") as f:
-            json.dump([fi.dict() for fi in findings], f, indent=2)
+            def to_dict(m):
+                # Pydantic v2 uses model_dump; v1 used dict
+                return m.model_dump() if hasattr(m, "model_dump") else m.dict()
+            json.dump([to_dict(fi) for fi in findings], f, indent=2)
         return outdir
+
+    def _render_report(self, outdir: str, findings: List[Finding]) -> dict:
+        # Render HTML via Jinja2
+        env = Environment(loader=FileSystemLoader("reporting/templates"))
+        tpl = env.get_template("report.html")
+        html = tpl.render(project=self.cfg.project, generated_at=str(datetime.utcnow()), findings=findings)
+        html_path = os.path.join(outdir, "report.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        # Try to render PDF with configured engine
+        pdf_path = None
+        try:
+            renderer = PDFRenderer(getattr(self.cfg.report, "engine", None))
+            pdf_path = os.path.join(outdir, "report.pdf")
+            renderer.render(html, pdf_path)
+        except Exception:
+            pdf_path = None
+        return {"html": html_path, "pdf": pdf_path}
 
 
 async def run_scan(config_path: str) -> dict:
     cfg = load_config(config_path)
     orch = Orchestrator(cfg)
     return await orch.run()
-
