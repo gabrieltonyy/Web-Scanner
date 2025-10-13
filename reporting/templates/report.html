@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ project or 'Web Vulnerability Assessment' }}</title>
+    <style>
+      body { font-family: Inter, Arial, sans-serif; margin: 32px; color: #222; }
+      h1, h2, h3 { color: #111; }
+      .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+      .sev-Critical { background: #b71c1c; color: #fff; }
+      .sev-High     { background: #e53935; color: #fff; }
+      .sev-Medium   { background: #fb8c00; color: #000; }
+      .sev-Low      { background: #fdd835; color: #000; }
+      .conf-High    { border: 1px solid #2e7d32; }
+      .conf-Medium  { border: 1px solid #1565c0; }
+      .conf-Low     { border: 1px solid #6a1b9a; }
+      .section { margin-bottom: 24px; }
+      .finding { border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 12px 0; }
+      .meta { font-size: 12px; color: #555; }
+      code { background: #f5f5f5; padding: 2px 4px; border-radius: 3px; }
+      pre { background: #f5f5f5; padding: 8px; border-radius: 6px; overflow-x: auto; }
+    </style>
+  </head>
+  <body>
+    <header class="section">
+      <h1>{{ project or 'Assessment Report' }}</h1>
+      <div class="meta">Generated: {{ generated_at }}</div>
+    </header>
+
+    <section class="section">
+      <h2>Executive Summary</h2>
+      <p>{{ executive_summary or 'Summary of key risks and outcomes.' }}</p>
+    </section>
+
+    <section class="section">
+      <h2>Methodology</h2>
+      <p>{{ methodology or 'OWASP Top 10 focused scanning with passive and active checks.' }}</p>
+    </section>
+
+    <section class="section">
+      <h2>Scope & Assumptions</h2>
+      <p>{{ scope or 'Targets scanned and constraints applied.' }}</p>
+    </section>
+
+    <section class="section">
+      <h2>Findings</h2>
+      {% if findings %}
+        {% for f in findings %}
+          <div class="finding">
+            <h3>{{ f.title }}
+              <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span>
+              {% if f.confidence %}<span class="badge conf-{{ f.confidence }}">{{ f.confidence }} confidence</span>{% endif %}
+            </h3>
+            <div class="meta">{{ f.method }} {{ f.endpoint }} {% if f.affects and f.affects.param %}(param: <code>{{ f.affects.param }}</code>){% endif %}</div>
+            {% if f.evidence %}
+              <p><strong>Evidence:</strong> {{ f.evidence.type }} — {{ f.evidence.value }}</p>
+              {% if f.evidence.match_context %}<pre>{{ f.evidence.match_context }}</pre>{% endif %}
+            {% endif %}
+            {% if f.poc %}
+              <p><strong>PoC:</strong></p>
+              <pre>{{ f.poc }}</pre>
+            {% endif %}
+            <p><strong>Remediation:</strong> {{ f.remediation }}</p>
+            {% if f.references %}
+              <p><strong>References:</strong> {{ f.references|join(', ') }}</p>
+            {% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p>No findings.</p>
+      {% endif %}
+    </section>
+
+    <section class="section">
+      <h2>Appendix</h2>
+      <p>{{ appendix or 'Artifacts, logs, and additional context.' }}</p>
+    </section>
+  </body>
+  </html>
+

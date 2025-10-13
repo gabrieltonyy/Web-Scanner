@@ -1,0 +1,73 @@
+project: "Acme WebApp"
+targets:
+  - "https://app.acme.test"
+scope:
+  include: ["https://app.acme.test"]
+  exclude: ["/logout", "/admin/delete*"]
+auth:
+  method: cookies   # none|basic|cookies|bearer
+  cookies: "sessionid=...; csrftoken=..."
+  # basic: { username: "", password: "" }
+  # bearer: { token: "..." }
+  # login_script: path/to/login.py  # optional custom login to fetch cookies
+  login_script_timeout: 30
+proxies:
+  http: "http://127.0.0.1:8080"  # ZAP/Burp
+  https: "http://127.0.0.1:8080"
+crawler:
+  max_pages: 1000
+  respect_robots: true
+  rate_limit_rps: 2
+  per_host_rps: 2
+  concurrency_per_host: 4
+checks:
+  sqli: true
+  xss: true
+  csrf: true
+  misconfig: true
+  access_control: false
+safety:
+  safe_mode: true           # disable destructive payloads
+  redact_secrets: true      # redact tokens/passwords in artifacts
+  ssrf_protection: true
+  blocklist_cidrs:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 169.254.0.0/16
+    - ::1/128
+    - fc00::/7
+    - fe80::/10
+  blocklist_hosts:
+    - metadata.google.internal
+    - 169.254.169.254
+integrations:
+  zap:
+    enabled: true
+    api_key: "${ZAP_API_KEY}"
+    url: "http://127.0.0.1:8080"
+    active_scan: true
+    map_confidence: true
+  burp:
+    enabled: false
+report:
+  output_dir: "reports"
+  filename: "acme-webapp-report.pdf"
+  engine: weasyprint        # weasyprint|wkhtmltopdf|reportlab
+  template: reporting/templates/report.html
+runtime:
+  concurrency: 10           # global max tasks
+  timeout_seconds: 20
+  retries: 2
+  backoff: exponential
+  honor_retry_after: true
+ci:
+  fail_on: High             # None|Low|Medium|High|Critical (or list)
+ui:
+  queue: rq                 # rq|celery|inline
+  redis_url: redis://localhost:6379/0
+  progress_transport: sse   # sse|websocket|poll
+env:
+  load_dotenv: true
+
