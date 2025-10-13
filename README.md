@@ -72,4 +72,4 @@ configs/
 - Update `test-plan.md` with validation steps after each set.
 
 ## License
-- TBD by repository owner.
+- MIT
