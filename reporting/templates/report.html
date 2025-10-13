@@ -2,10 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>{{ project or 'Web Vulnerability Assessment' }}</title>
+    <title>{{ report_title or project or 'Security Assessment Report' }}</title>
     <style>
       body { font-family: Inter, Arial, sans-serif; margin: 32px; color: #222; }
       h1, h2, h3 { color: #111; }
+      h1 { margin-bottom: 4px; }
+      .subtle { color: #666; font-size: 12px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
       .sev-Critical { background: #b71c1c; color: #fff; }
       .sev-High     { background: #e53935; color: #fff; }
@@ -14,67 +17,132 @@
       .conf-High    { border: 1px solid #2e7d32; }
       .conf-Medium  { border: 1px solid #1565c0; }
       .conf-Low     { border: 1px solid #6a1b9a; }
-      .section { margin-bottom: 24px; }
+      .section { margin-bottom: 28px; }
+      .panel { border: 1px solid #ddd; border-radius: 6px; padding: 16px; }
       .finding { border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 12px 0; }
       .meta { font-size: 12px; color: #555; }
+      .summary-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+      .summary-table th, .summary-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
       code { background: #f5f5f5; padding: 2px 4px; border-radius: 3px; }
       pre { background: #f5f5f5; padding: 8px; border-radius: 6px; overflow-x: auto; }
+      .page-break { page-break-before: always; }
     </style>
   </head>
   <body>
+    <!-- Cover / Header -->
     <header class="section">
-      <h1>{{ project or 'Assessment Report' }}</h1>
-      <div class="meta">Generated: {{ generated_at }}</div>
+      <h1>{{ report_title or project }}</h1>
+      <div class="subtle">Generated: {{ generated_at }} | Targets: {{ targets|length }} | URLs crawled: {{ url_count }}</div>
+      {% if client or assessor or company or contact %}
+        <div class="subtle">Client: {{ client or '-' }} | Assessor: {{ assessor or '-' }} | Company: {{ company or '-' }} | Contact: {{ contact or '-' }}</div>
+      {% endif %}
     </header>
 
+    <!-- Executive Summary -->
     <section class="section">
       <h2>Executive Summary</h2>
-      <p>{{ executive_summary or 'Summary of key risks and outcomes.' }}</p>
+      {% if executive_summary %}
+        <p>{{ executive_summary }}</p>
+      {% else %}
+        <p>This assessment focused on the in-scope targets using a risk‑based approach mapped to OWASP Top 10. The table below summarizes the number of confirmed issues by severity.</p>
+      {% endif %}
+      {% if summary %}
+        <table class="summary-table">
+          <thead><tr><th>Severity</th><th>Count</th></tr></thead>
+          <tbody>
+            <tr><td><span class="badge sev-Critical">Critical</span></td><td>{{ summary.by_severity['Critical'] }}</td></tr>
+            <tr><td><span class="badge sev-High">High</span></td><td>{{ summary.by_severity['High'] }}</td></tr>
+            <tr><td><span class="badge sev-Medium">Medium</span></td><td>{{ summary.by_severity['Medium'] }}</td></tr>
+            <tr><td><span class="badge sev-Low">Low</span></td><td>{{ summary.by_severity['Low'] }}</td></tr>
+          </tbody>
+        </table>
+        {% set total = (summary.by_severity['Critical'] + summary.by_severity['High'] + summary.by_severity['Medium'] + summary.by_severity['Low']) %}
+        {% if total > 0 %}
+        <div class="panel">
+          <div class="subtle">Severity distribution</div>
+          <svg width="100%" height="28" viewBox="0 0 100 10" preserveAspectRatio="none">
+            {% set c = (summary.by_severity['Critical'] / total * 100.0) %}
+            {% set h = (summary.by_severity['High'] / total * 100.0) %}
+            {% set m = (summary.by_severity['Medium'] / total * 100.0) %}
+            {% set l = (summary.by_severity['Low'] / total * 100.0) %}
+            <rect x="0" y="0" width="{{ c }}" height="10" fill="#b71c1c"/>
+            <rect x="{{ c }}" y="0" width="{{ h }}" height="10" fill="#e53935"/>
+            <rect x="{{ c + h }}" y="0" width="{{ m }}" height="10" fill="#fb8c00"/>
+            <rect x="{{ c + h + m }}" y="0" width="{{ l }}" height="10" fill="#fdd835"/>
+          </svg>
+        </div>
+        {% endif %}
+        {% if summary.by_category %}
+          <p class="subtle">Top categories: {{ summary.by_category[:4]|map(attribute=0)|join(', ') }}</p>
+        {% endif %}
+      {% endif %}
     </section>
 
+    <!-- Methodology -->
     <section class="section">
       <h2>Methodology</h2>
-      <p>{{ methodology or 'OWASP Top 10 focused scanning with passive and active checks.' }}</p>
+      <p>{{ methodology or 'Automated crawl with passive checks (headers, cookies, TLS, CSRF heuristics) and selected active checks (reflected XSS, SQL injection). Findings include reproducible evidence where possible.' }}</p>
     </section>
 
+    <!-- Scope & Assumptions -->
     <section class="section">
       <h2>Scope & Assumptions</h2>
-      <p>{{ scope or 'Targets scanned and constraints applied.' }}</p>
+      <div class="panel">
+        <div><strong>Targets:</strong> {{ targets|join(', ') }}</div>
+        <div><strong>Include:</strong> {{ scope_include|join(', ') if scope_include else '—' }}</div>
+        <div><strong>Exclude:</strong> {{ scope_exclude|join(', ') if scope_exclude else '—' }}</div>
+        {% if assumptions %}<div><strong>Assumptions:</strong> {{ assumptions }}</div>{% endif %}
+        <div class="subtle">Only assets with explicit authorization were tested. Rate limits and safe defaults were respected.</div>
+      </div>
     </section>
 
+    <!-- Findings -->
     <section class="section">
       <h2>Findings</h2>
-      {% if findings %}
-        {% for f in findings %}
-          <div class="finding">
-            <h3>{{ f.title }}
-              <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span>
-              {% if f.confidence %}<span class="badge conf-{{ f.confidence }}">{{ f.confidence }} confidence</span>{% endif %}
-            </h3>
-            <div class="meta">{{ f.method }} {{ f.endpoint }} {% if f.affects and f.affects.param %}(param: <code>{{ f.affects.param }}</code>){% endif %}</div>
-            {% if f.evidence %}
-              <p><strong>Evidence:</strong> {{ f.evidence.type }} — {{ f.evidence.value }}</p>
-              {% if f.evidence.match_context %}<pre>{{ f.evidence.match_context }}</pre>{% endif %}
-            {% endif %}
-            {% if f.poc %}
-              <p><strong>PoC:</strong></p>
-              <pre>{{ f.poc }}</pre>
-            {% endif %}
-            <p><strong>Remediation:</strong> {{ f.remediation }}</p>
-            {% if f.references %}
-              <p><strong>References:</strong> {{ f.references|join(', ') }}</p>
-            {% endif %}
-          </div>
+      {% if findings and findings|length > 0 %}
+        {% set order = ['Critical','High','Medium','Low'] %}
+        {% for sev in order %}
+          {% set group = findings|selectattr('severity','equalto',sev)|list %}
+          {% if group and group|length > 0 %}
+            <h3>{{ sev }} ({{ group|length }})</h3>
+            {% for f in group %}
+              <div class="finding">
+                <h3>{{ f.title }} <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span> {% if f.confidence %}<span class="badge conf-{{ f.confidence }}">{{ f.confidence }} confidence</span>{% endif %}</h3>
+                <div class="meta">Category: {{ f.category }}{% if f.cwe_id %} | CWE: {{ f.cwe_id }}{% endif %}{% if f.owasp %} | OWASP: {{ f.owasp }}{% endif %}</div>
+                <div class="meta">Location: {{ f.method }} {{ f.endpoint }} {% if f.affects and f.affects.param %}(param: <code>{{ f.affects.param }}</code>){% endif %}</div>
+
+                {% if f.evidence %}
+                  <p><strong>Evidence</strong>: {{ f.evidence.type }} — {{ f.evidence.value }}</p>
+                  {% if f.evidence.match_context %}<pre>{{ f.evidence.match_context }}</pre>{% endif %}
+                {% endif %}
+
+                {% if f.poc %}
+                  <p><strong>Proof of Concept</strong></p>
+                  <pre>{{ f.poc }}</pre>
+                {% endif %}
+
+                {% if f.impact %}{% endif %}
+                <p><strong>Impact</strong>: Exploitation may affect confidentiality, integrity, or availability depending on context. Validate business impact for the affected endpoints.</p>
+
+                <p><strong>Remediation</strong>: {{ f.remediation }}</p>
+                {% if f.references %}
+                  <p><strong>References</strong>: {{ f.references|join(', ') }}</p>
+                {% endif %}
+                <div class="meta">ID: {{ f.id }} | Source: {{ f.source }}{% if f.source_id %} ({{ f.source_id }}){% endif %} {% if f.first_seen %}| First seen: {{ f.first_seen }}{% endif %}{% if f.last_seen %} | Last seen: {{ f.last_seen }}{% endif %}</div>
+              </div>
+            {% endfor %}
+          {% endif %}
         {% endfor %}
       {% else %}
         <p>No findings.</p>
       {% endif %}
     </section>
 
-    <section class="section">
+    <!-- Appendix -->
+    <section class="section page-break">
       <h2>Appendix</h2>
-      <p>{{ appendix or 'Artifacts, logs, and additional context.' }}</p>
+      <p>Artifacts are available under the accompanying <code>artifacts</code> directory: <code>crawl.json</code>, <code>findings.json</code>, and this report. Sensitive values may be redacted by policy.</p>
+      <p class="subtle">This report reflects the state of the application at the time of testing. Follow-up verification is recommended after remediation.</p>
     </section>
   </body>
   </html>
-

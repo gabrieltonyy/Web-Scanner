@@ -91,6 +91,15 @@ class ReportConfig(BaseModel):
     filename: str = "report.pdf"
     engine: str = DEFAULT_ENGINE
     template: str = "reporting/templates/report.html"
+    # Optional presentation metadata
+    title: Optional[str] = None
+    client: Optional[str] = None
+    assessor: Optional[str] = None
+    company: Optional[str] = None
+    contact: Optional[str] = None
+    executive_summary: Optional[str] = None
+    methodology: Optional[str] = None
+    assumptions: Optional[str] = None
 
 
 class RuntimeConfig(BaseModel):
@@ -155,4 +164,3 @@ def load_config(path: str) -> Config:
         raw = yaml.safe_load(f) or {}
     raw = _interpolate_env(raw)
     return Config(**raw)
-

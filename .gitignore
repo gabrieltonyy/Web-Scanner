@@ -21,3 +21,6 @@ reports/
 job-plan.md
 test-plan.md
 gitpush-plan.md
+
+# Local/private configs
+configs/moconnect-login.yml

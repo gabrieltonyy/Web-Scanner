@@ -21,6 +21,7 @@ from .models import Finding
 from .utils import dedupe_findings
 from reporting.engines import PDFRenderer
 from jinja2 import Environment, FileSystemLoader
+from integrations.zap_adapter import ZAPAdapter
 
 
 class Orchestrator:
@@ -81,9 +82,18 @@ class Orchestrator:
                     # Best-effort; continue scanning
                     continue
 
+        # Integrations: ZAP view alerts (optional)
+        if getattr(self.cfg.integrations.zap, "enabled", False):
+            try:
+                zap = ZAPAdapter(self.cfg.integrations.zap.url, self.cfg.integrations.zap.api_key)
+                for t in self.cfg.targets:
+                    findings.extend(await zap.fetch_alerts(t))
+            except Exception:
+                pass
+
         deduped = dedupe_findings(findings)
         artifact_dir = self._write_artifacts(urls, deduped)
-        report_paths = self._render_report(artifact_dir, deduped)
+        report_paths = self._render_report(artifact_dir, deduped, len(urls))
         return {
             "artifact_dir": artifact_dir,
             "report": report_paths,
@@ -105,11 +115,42 @@ class Orchestrator:
             json.dump([to_dict(fi) for fi in findings], f, indent=2)
         return outdir
 
-    def _render_report(self, outdir: str, findings: List[Finding]) -> dict:
+    def _render_report(self, outdir: str, findings: List[Finding], url_count: int) -> dict:
+        # Summarize findings by severity/category for the report
+        sev_order = ["Critical", "High", "Medium", "Low"]
+        counts = {k: 0 for k in sev_order}
+        by_cat: dict[str, int] = {}
+        for f in findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+            by_cat[f.category] = by_cat.get(f.category, 0) + 1
+
+        summary = {
+            "total": len(findings),
+            "by_severity": counts,
+            "by_category": sorted(by_cat.items(), key=lambda x: (-x[1], x[0])),
+        }
+
         # Render HTML via Jinja2
         env = Environment(loader=FileSystemLoader("reporting/templates"))
         tpl = env.get_template("report.html")
-        html = tpl.render(project=self.cfg.project, generated_at=str(datetime.utcnow()), findings=findings)
+        html = tpl.render(
+            project=self.cfg.project,
+            report_title=self.cfg.report.title or self.cfg.project,
+            generated_at=str(datetime.utcnow()),
+            findings=findings,
+            summary=summary,
+            targets=self.cfg.targets,
+            scope_include=self.cfg.scope.include,
+            scope_exclude=self.cfg.scope.exclude,
+            url_count=url_count,
+            client=self.cfg.report.client,
+            assessor=self.cfg.report.assessor,
+            company=self.cfg.report.company,
+            contact=self.cfg.report.contact,
+            executive_summary=self.cfg.report.executive_summary,
+            methodology=self.cfg.report.methodology,
+            assumptions=self.cfg.report.assumptions,
+        )
         html_path = os.path.join(outdir, "report.html")
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html)
