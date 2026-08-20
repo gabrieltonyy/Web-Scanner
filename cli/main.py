@@ -17,11 +17,14 @@ def main(argv: list[str] | None = None) -> int:
     p_scan = sub.add_parser("scan", help="Run a scan from a YAML config")
     p_scan.add_argument("-c", "--config", required=True, help="Path to config YAML")
     p_scan.add_argument("--fail-on", choices=["Low","Medium","High","Critical"], help="Fail the run if any finding meets this severity or higher")
+    p_scan.add_argument("--dangerous", action="store_true", help="Disable safe mode and enable the full active SQLi payload set")
 
     args = parser.parse_args(argv)
 
     if args.cmd == "scan":
-        res = asyncio.run(run_scan(args.config))
+        if args.dangerous:
+            print("WARNING: Running with safe_mode disabled — active payloads may affect target state.", file=sys.stderr)
+        res = asyncio.run(run_scan(args.config, dangerous=args.dangerous))
         print(f"Artifacts: {res['artifact_dir']} | URLs: {res['url_count']} | Findings: {res['findings_count']}")
         # Determine fail-on threshold from CLI or config
         cfg = load_config(args.config)

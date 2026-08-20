@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Dict, List
+from typing import List, Optional
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
 import httpx
 
 from ..models import Affects, Evidence, Finding, HTTPRequest, HTTPResponse
+from ..safety import SSRFGuard
 
 
 SQL_ERRORS = [
@@ -36,19 +37,26 @@ def _inject_param(url: str, param: str, value: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
 
 
-async def check_sqli(url: str, client: httpx.AsyncClient) -> List[Finding]:
+async def check_sqli(
+    url: str,
+    client: httpx.AsyncClient,
+    safe_mode: bool = True,
+    ssrf_guard: Optional[SSRFGuard] = None,
+) -> List[Finding]:
     findings: List[Finding] = []
     parsed = urlparse(url)
     params = dict(parse_qsl(parsed.query, keep_blank_values=True))
     if not params:
         return findings
 
-    payloads = ["'", '"', "')", '")', "'--", '"--']
+    # The single-character probes are sufficient for the error-based detector
+    # and avoid SQL comment / expression syntax in safe mode.
+    payloads = ["'", '"'] if safe_mode else ["'", '"', "')", '")', "'--", '"--']
 
     for name in params.keys():
         for payload in payloads:
             test_url = _inject_param(url, name, params[name] + payload if params[name] else payload)
-            r = await client.get(test_url)
+            r = await ssrf_guard.get(client, test_url) if ssrf_guard else await client.get(test_url)
             body = r.text or ""
             if SQL_ERROR_RE.search(body):
                 snippet = body[:500]
@@ -73,4 +81,3 @@ async def check_sqli(url: str, client: httpx.AsyncClient) -> List[Finding]:
                 )
                 break
     return findings
-

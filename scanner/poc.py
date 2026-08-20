@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import shlex
-from typing import Dict
+from typing import Dict, Tuple
 
 from .models import HTTPRequest, Evidence
 from .safety import redact_text
+
+
+def redact_headers(headers: Dict[str, str]) -> Tuple[Dict[str, str], bool]:
+    """Redact sensitive values in headers while preserving their field names."""
+    redacted_headers: Dict[str, str] = {}
+    changed = False
+    for name, value in (headers or {}).items():
+        line = f"{name}: {value}"
+        redacted_line = redact_text(line)
+        redacted_headers[name] = redacted_line[len(name) + 2 :]
+        changed = changed or redacted_line != line
+    return redacted_headers, changed
 
 
 def curl_from_request(req: HTTPRequest) -> str:
@@ -34,4 +46,3 @@ def requests_snippet(req: HTTPRequest) -> str:
 
 def make_reflection_evidence(payload: str, context: str | None = None) -> Evidence:
     return Evidence(type="reflection", value=payload, match_context=context, signature=payload)
-

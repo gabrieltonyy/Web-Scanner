@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime
 from typing import List, Set
-from urllib.parse import urlparse
 
 import httpx
 
@@ -19,14 +19,24 @@ from .checks.sqli import check_sqli
 from .checks.csrf import check_csrf_forms
 from .models import Finding
 from .utils import dedupe_findings
+from .safety import SSRFBlocked, SSRFGuard, redact_text
+from .poc import redact_headers
 from reporting.engines import PDFRenderer
 from jinja2 import Environment, FileSystemLoader
 from integrations.zap_adapter import ZAPAdapter
 
 
+logger = logging.getLogger(__name__)
+
+
 class Orchestrator:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self._ssrf_guard = SSRFGuard(
+            enabled=cfg.safety.ssrf_protection,
+            blocklist_cidrs=cfg.safety.blocklist_cidrs,
+            blocklist_hosts=cfg.safety.blocklist_hosts,
+        )
 
     async def crawl(self) -> Set[str]:
         c = Crawler(
@@ -35,6 +45,9 @@ class Orchestrator:
             timeout=float(self.cfg.runtime.timeout_seconds),
             per_host_rps=float(self.cfg.crawler.per_host_rps),
             respect_robots=self.cfg.crawler.respect_robots,
+            ssrf_protection=self.cfg.safety.ssrf_protection,
+            blocklist_cidrs=self.cfg.safety.blocklist_cidrs,
+            blocklist_hosts=self.cfg.safety.blocklist_hosts,
         )
         try:
             urls = await c.crawl(
@@ -50,34 +63,37 @@ class Orchestrator:
 
     async def passive_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
         findings: List[Finding] = []
-        r = await client.get(url)
+        r = await self._ssrf_guard.get(client, url)
         hdrs = dict(r.headers)
-        findings.extend(check_security_headers(url, hdrs))
-        findings.extend(check_cookie_flags(url, hdrs, https=url.startswith("https://")))
-        if url.startswith("https://"):
-            findings.extend(check_tls_version(url, hdrs))
+        if self.cfg.checks.misconfig:
+            findings.extend(check_security_headers(url, hdrs))
+            findings.extend(check_cookie_flags(url, hdrs, https=url.startswith("https://")))
+            if url.startswith("https://"):
+                findings.extend(check_tls_version(url, hdrs))
         ctype = hdrs.get("content-type", "").lower()
-        if "html" in ctype and r.text:
+        if self.cfg.checks.csrf and "html" in ctype and r.text:
             findings.extend(check_csrf_forms(url, r.text, hdrs))
         return findings
 
     async def active_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
         findings: List[Finding] = []
-        findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://")))
-        findings.extend(await check_sqli(url, client))
+        findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://"), ssrf_guard=self._ssrf_guard))
+        findings.extend(await check_sqli(url, client, safe_mode=self.cfg.safety.safe_mode, ssrf_guard=self._ssrf_guard))
         return findings
 
     async def run(self) -> dict:
         urls = await self.crawl()
         findings: List[Finding] = []
-        async with httpx.AsyncClient(follow_redirects=True, timeout=self.cfg.runtime.timeout_seconds) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=self.cfg.runtime.timeout_seconds) as client:
             for url in urls:
                 try:
                     findings.extend(await self.passive_checks_for(url, client))
                     if self.cfg.checks.xss:
-                        findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://")))
+                        findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://"), ssrf_guard=self._ssrf_guard))
                     if self.cfg.checks.sqli:
-                        findings.extend(await check_sqli(url, client))
+                        findings.extend(await check_sqli(url, client, safe_mode=self.cfg.safety.safe_mode, ssrf_guard=self._ssrf_guard))
+                except SSRFBlocked as exc:
+                    logger.warning("Skipped blocked URL during checks: %s", exc)
                 except Exception:
                     # Best-effort; continue scanning
                     continue
@@ -103,6 +119,8 @@ class Orchestrator:
         }
 
     def _write_artifacts(self, urls: Set[str], findings: List[Finding]) -> str:
+        if self.cfg.safety.redact_secrets:
+            self._redact_findings(findings)
         ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         outdir = os.path.join("artifacts", ts)
         os.makedirs(outdir, exist_ok=True)
@@ -114,6 +132,27 @@ class Orchestrator:
                 return m.model_dump() if hasattr(m, "model_dump") else m.dict()
             json.dump([to_dict(fi) for fi in findings], f, indent=2)
         return outdir
+
+    @staticmethod
+    def _redact_findings(findings: List[Finding]) -> None:
+        """Redact persisted/reportable finding data in place before artifact output."""
+        for finding in findings:
+            request = finding.request
+            request.headers, changed = redact_headers(request.headers)
+            if request.body:
+                redacted_body = redact_text(request.body)
+                changed = changed or redacted_body != request.body
+                request.body = redacted_body
+            request.redacted = changed
+
+            if finding.response:
+                finding.response.headers, _ = redact_headers(finding.response.headers)
+                if finding.response.body_excerpt:
+                    finding.response.body_excerpt = redact_text(finding.response.body_excerpt)
+            if finding.evidence and finding.evidence.match_context:
+                finding.evidence.match_context = redact_text(finding.evidence.match_context)
+            if finding.poc:
+                finding.poc = redact_text(finding.poc)
 
     def _render_report(self, outdir: str, findings: List[Finding], url_count: int) -> dict:
         # Summarize findings by severity/category for the report
@@ -165,7 +204,9 @@ class Orchestrator:
         return {"html": html_path, "pdf": pdf_path}
 
 
-async def run_scan(config_path: str) -> dict:
+async def run_scan(config_path: str, dangerous: bool = False) -> dict:
     cfg = load_config(config_path)
+    if dangerous:
+        cfg.safety.safe_mode = False
     orch = Orchestrator(cfg)
     return await orch.run()

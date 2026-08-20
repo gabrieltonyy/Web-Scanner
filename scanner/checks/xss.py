@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import html
-import re
-from typing import Dict, List, Tuple
+from typing import List, Optional
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
 import httpx
 
 from ..models import Affects, Evidence, Finding, HTTPRequest, HTTPResponse
+from ..safety import SSRFGuard
 
 
 def _inject_param(url: str, param: str, value: str) -> str:
@@ -19,7 +17,12 @@ def _inject_param(url: str, param: str, value: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
 
 
-async def check_reflected_xss(url: str, client: httpx.AsyncClient, https: bool = False) -> List[Finding]:
+async def check_reflected_xss(
+    url: str,
+    client: httpx.AsyncClient,
+    https: bool = False,
+    ssrf_guard: Optional[SSRFGuard] = None,
+) -> List[Finding]:
     findings: List[Finding] = []
     parsed = urlparse(url)
     params = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -29,7 +32,7 @@ async def check_reflected_xss(url: str, client: httpx.AsyncClient, https: bool =
     for name in params.keys():
         marker = f"<xss-{name}-123>"
         test_url = _inject_param(url, name, marker)
-        r = await client.get(test_url)
+        r = await ssrf_guard.get(client, test_url) if ssrf_guard else await client.get(test_url)
         ctype = r.headers.get("content-type", "").lower()
         if "html" not in ctype:
             # still check but deprioritize
