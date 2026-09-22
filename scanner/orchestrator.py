@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime
-from typing import List, Set
+from importlib import resources
+from typing import Iterator, List, Set
 
 import httpx
 
@@ -26,6 +28,14 @@ from jinja2 import Environment, FileSystemLoader
 from integrations.zap_adapter import ZAPAdapter
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _template_directory() -> Iterator[str]:
+    """Expose packaged report templates as a filesystem directory for Jinja."""
+    template_dir = resources.files("reporting").joinpath("templates")
+    with resources.as_file(template_dir) as path:
+        yield str(path)
 
 
 class Orchestrator:
@@ -152,25 +162,26 @@ class Orchestrator:
             counts[finding.severity] = counts.get(finding.severity, 0) + 1
             by_cat[finding.category] = by_cat.get(finding.category, 0) + 1
         summary = {"total": len(findings), "by_severity": counts, "by_category": sorted(by_cat.items(), key=lambda x: (-x[1], x[0]))}
-        env = Environment(loader=FileSystemLoader("reporting/templates"))
-        html = env.get_template("report.html").render(
-            project=self.cfg.project,
-            report_title=self.cfg.report.title or self.cfg.project,
-            generated_at=str(datetime.utcnow()),
-            findings=findings,
-            summary=summary,
-            targets=self.cfg.targets,
-            scope_include=self.cfg.scope.include,
-            scope_exclude=self.cfg.scope.exclude,
-            url_count=url_count,
-            client=self.cfg.report.client,
-            assessor=self.cfg.report.assessor,
-            company=self.cfg.report.company,
-            contact=self.cfg.report.contact,
-            executive_summary=self.cfg.report.executive_summary,
-            methodology=self.cfg.report.methodology,
-            assumptions=self.cfg.report.assumptions,
-        )
+        with _template_directory() as template_dir:
+            env = Environment(loader=FileSystemLoader(template_dir))
+            html = env.get_template("report.html").render(
+                project=self.cfg.project,
+                report_title=self.cfg.report.title or self.cfg.project,
+                generated_at=str(datetime.utcnow()),
+                findings=findings,
+                summary=summary,
+                targets=self.cfg.targets,
+                scope_include=self.cfg.scope.include,
+                scope_exclude=self.cfg.scope.exclude,
+                url_count=url_count,
+                client=self.cfg.report.client,
+                assessor=self.cfg.report.assessor,
+                company=self.cfg.report.company,
+                contact=self.cfg.report.contact,
+                executive_summary=self.cfg.report.executive_summary,
+                methodology=self.cfg.report.methodology,
+                assumptions=self.cfg.report.assumptions,
+            )
         html_path = os.path.join(outdir, "report.html")
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html)
