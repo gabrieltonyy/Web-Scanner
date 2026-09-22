@@ -1,10 +1,14 @@
 # Core runtime
 pydantic>=1.10
-httpx>=0.24
+httpx>=0.24,<0.28
 beautifulsoup4>=4.12
 Jinja2>=3.1
 PyYAML>=6.0
 python-dotenv>=1.0
+
+# Test suite
+pytest>=8.0
+pytest-asyncio>=0.23
 
 # Optional HTML → PDF engine (choose one in runtime config)
 # weasyprint>=60.0

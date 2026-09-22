@@ -25,7 +25,6 @@ from reporting.engines import PDFRenderer
 from jinja2 import Environment, FileSystemLoader
 from integrations.zap_adapter import ZAPAdapter
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +40,7 @@ class Orchestrator:
         )
 
     async def crawl(self) -> Set[str]:
-        c = Crawler(
+        crawler = Crawler(
             concurrency=self.cfg.runtime.concurrency,
             concurrency_per_host=self.cfg.crawler.concurrency_per_host,
             timeout=float(self.cfg.runtime.timeout_seconds),
@@ -54,112 +53,65 @@ class Orchestrator:
             proxies=self._proxy_map,
             retries=self.cfg.runtime.retries,
             backoff=self.cfg.runtime.backoff,
+            honor_retry_after=self.cfg.runtime.honor_retry_after,
         )
         try:
-            urls = await c.crawl(
+            return await crawler.crawl(
                 seeds=self.cfg.targets,
                 include=self.cfg.scope.include,
                 exclude=self.cfg.scope.exclude,
                 max_pages=self.cfg.crawler.max_pages,
                 use_sitemap=True,
             )
-            return urls
         finally:
-            await c.close()
+            await crawler.close()
 
     async def passive_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
         findings: List[Finding] = []
-        r = await self._ssrf_guard.get(client, url, headers=self._auth_headers)
-        hdrs = dict(r.headers)
+        response = await self._ssrf_guard.get(client, url, headers=self._auth_headers)
+        headers = dict(response.headers)
         if self.cfg.checks.misconfig:
-            findings.extend(check_security_headers(url, hdrs))
-            findings.extend(check_cookie_flags(url, hdrs, https=url.startswith("https://")))
+            findings.extend(check_security_headers(url, headers))
+            findings.extend(check_cookie_flags(url, headers, https=url.startswith("https://")))
             if url.startswith("https://"):
-                findings.extend(check_tls_version(url, hdrs))
-        ctype = hdrs.get("content-type", "").lower()
-        if self.cfg.checks.csrf and "html" in ctype and r.text:
-            findings.extend(check_csrf_forms(url, r.text, hdrs))
+                findings.extend(check_tls_version(url, headers))
+        if self.cfg.checks.csrf and "html" in headers.get("content-type", "").lower() and response.text:
+            findings.extend(check_csrf_forms(url, response.text, headers))
         return findings
 
     async def active_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
         findings: List[Finding] = []
-        findings.extend(
-            await check_reflected_xss(
-                url,
-                client,
-                https=url.startswith("https://"),
-                ssrf_guard=self._ssrf_guard,
-                headers=self._auth_headers,
-            )
-        )
-        findings.extend(
-            await check_sqli(
-                url,
-                client,
-                safe_mode=self.cfg.safety.safe_mode,
-                ssrf_guard=self._ssrf_guard,
-                headers=self._auth_headers,
-            )
-        )
+        if self.cfg.checks.xss:
+            findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://"), ssrf_guard=self._ssrf_guard, headers=self._auth_headers))
+        if self.cfg.checks.sqli:
+            findings.extend(await check_sqli(url, client, safe_mode=self.cfg.safety.safe_mode, ssrf_guard=self._ssrf_guard, headers=self._auth_headers))
         return findings
 
     async def run(self) -> dict:
         urls = await self.crawl()
         findings: List[Finding] = []
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-            timeout=self.cfg.runtime.timeout_seconds,
-            proxies=self._proxy_map,
-            headers=self._auth_headers,
-        ) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=self.cfg.runtime.timeout_seconds, proxies=self._proxy_map, headers=self._auth_headers) as client:
             for url in urls:
                 try:
                     findings.extend(await self.passive_checks_for(url, client))
-                    if self.cfg.checks.xss:
-                        findings.extend(
-                            await check_reflected_xss(
-                                url,
-                                client,
-                                https=url.startswith("https://"),
-                                ssrf_guard=self._ssrf_guard,
-                                headers=self._auth_headers,
-                            )
-                        )
-                    if self.cfg.checks.sqli:
-                        findings.extend(
-                            await check_sqli(
-                                url,
-                                client,
-                                safe_mode=self.cfg.safety.safe_mode,
-                                ssrf_guard=self._ssrf_guard,
-                                headers=self._auth_headers,
-                            )
-                        )
+                    findings.extend(await self.active_checks_for(url, client))
                 except SSRFBlocked as exc:
                     logger.warning("Skipped blocked URL during checks: %s", exc)
                 except Exception:
-                    # Best-effort; continue scanning
-                    continue
+                    logger.exception("Checks failed for %s", url)
 
-        # Integrations: ZAP view alerts (optional)
         if getattr(self.cfg.integrations.zap, "enabled", False):
             try:
                 zap = ZAPAdapter(self.cfg.integrations.zap.url, self.cfg.integrations.zap.api_key)
-                for t in self.cfg.targets:
-                    findings.extend(await zap.fetch_alerts(t))
+                for target in self.cfg.targets:
+                    findings.extend(await zap.fetch_alerts(target))
             except Exception:
-                pass
+                logger.exception("ZAP alert import failed")
 
         deduped = dedupe_findings(findings)
         artifact_dir = self._write_artifacts(urls, deduped)
         report_paths = self._render_report(artifact_dir, deduped, len(urls))
-        return {
-            "artifact_dir": artifact_dir,
-            "report": report_paths,
-            "url_count": len(urls),
-            "findings_count": len(deduped),
-            "findings": deduped,
-        }
+        return {"artifact_dir": artifact_dir, "report": report_paths, "url_count": len(urls), "findings_count": len(deduped), "findings": deduped}
 
     def _write_artifacts(self, urls: Set[str], findings: List[Finding]) -> str:
         if self.cfg.safety.redact_secrets:
@@ -168,17 +120,13 @@ class Orchestrator:
         outdir = os.path.join("artifacts", ts)
         os.makedirs(outdir, exist_ok=True)
         with open(os.path.join(outdir, "crawl.json"), "w", encoding="utf-8") as f:
-            json.dump(sorted(list(urls)), f, indent=2)
+            json.dump(sorted(urls), f, indent=2)
         with open(os.path.join(outdir, "findings.json"), "w", encoding="utf-8") as f:
-            def to_dict(m):
-                # Pydantic v2 uses model_dump; v1 used dict
-                return m.model_dump() if hasattr(m, "model_dump") else m.dict()
-            json.dump([to_dict(fi) for fi in findings], f, indent=2)
+            json.dump([m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in findings], f, indent=2)
         return outdir
 
     @staticmethod
     def _redact_findings(findings: List[Finding]) -> None:
-        """Redact persisted/reportable finding data in place before artifact output."""
         for finding in findings:
             request = finding.request
             request.headers, changed = redact_headers(request.headers)
@@ -187,7 +135,6 @@ class Orchestrator:
                 changed = changed or redacted_body != request.body
                 request.body = redacted_body
             request.redacted = changed
-
             if finding.response:
                 finding.response.headers, _ = redact_headers(finding.response.headers)
                 if finding.response.body_excerpt:
@@ -198,24 +145,15 @@ class Orchestrator:
                 finding.poc = redact_text(finding.poc)
 
     def _render_report(self, outdir: str, findings: List[Finding], url_count: int) -> dict:
-        # Summarize findings by severity/category for the report
         sev_order = ["Critical", "High", "Medium", "Low"]
-        counts = {k: 0 for k in sev_order}
+        counts = {severity: 0 for severity in sev_order}
         by_cat: dict[str, int] = {}
-        for f in findings:
-            counts[f.severity] = counts.get(f.severity, 0) + 1
-            by_cat[f.category] = by_cat.get(f.category, 0) + 1
-
-        summary = {
-            "total": len(findings),
-            "by_severity": counts,
-            "by_category": sorted(by_cat.items(), key=lambda x: (-x[1], x[0])),
-        }
-
-        # Render HTML via Jinja2
+        for finding in findings:
+            counts[finding.severity] = counts.get(finding.severity, 0) + 1
+            by_cat[finding.category] = by_cat.get(finding.category, 0) + 1
+        summary = {"total": len(findings), "by_severity": counts, "by_category": sorted(by_cat.items(), key=lambda x: (-x[1], x[0]))}
         env = Environment(loader=FileSystemLoader("reporting/templates"))
-        tpl = env.get_template("report.html")
-        html = tpl.render(
+        html = env.get_template("report.html").render(
             project=self.cfg.project,
             report_title=self.cfg.report.title or self.cfg.project,
             generated_at=str(datetime.utcnow()),
@@ -236,12 +174,10 @@ class Orchestrator:
         html_path = os.path.join(outdir, "report.html")
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html)
-        # Try to render PDF with configured engine
         pdf_path = None
         try:
-            renderer = PDFRenderer(getattr(self.cfg.report, "engine", None))
             pdf_path = os.path.join(outdir, "report.pdf")
-            renderer.render(html, pdf_path)
+            PDFRenderer(getattr(self.cfg.report, "engine", None)).render(html, pdf_path)
         except Exception:
             pdf_path = None
         return {"html": html_path, "pdf": pdf_path}
@@ -251,6 +187,4 @@ async def run_scan(config_path: str, dangerous: bool = False) -> dict:
     cfg = load_config(config_path)
     if dangerous:
         cfg.safety.safe_mode = False
-    orch = Orchestrator(cfg)
-    return await orch.run()
-
+    return await Orchestrator(cfg).run()

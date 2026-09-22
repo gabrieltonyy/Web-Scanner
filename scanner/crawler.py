@@ -14,7 +14,6 @@ from bs4 import BeautifulSoup
 
 from .safety import SSRFBlocked, SSRFGuard
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -35,10 +34,8 @@ class Crawler:
         proxies: Optional[Dict[str, str]] = None,
         retries: int = 2,
         backoff: str = "exponential",
+        honor_retry_after: bool = True,
     ):
-        # follow_redirects is intentionally False: redirects are followed manually
-        # in fetch() so each hop can be checked against the SSRF blocklist before
-        # the request is made.
         self._client = httpx.AsyncClient(
             follow_redirects=False,
             timeout=timeout,
@@ -55,6 +52,7 @@ class Crawler:
         self._auth_headers = auth_headers or {}
         self._retries = max(0, retries)
         self._backoff = backoff
+        self._honor_retry_after = honor_retry_after
         self._ssrf_guard = SSRFGuard(
             enabled=ssrf_protection,
             blocklist_cidrs=blocklist_cidrs,
@@ -64,9 +62,9 @@ class Crawler:
     async def close(self):
         await self._client.aclose()
 
-    def _host_sem(self, host: str, concurrency_per_host: int) -> asyncio.Semaphore:
+    def _host_sem(self, host: str) -> asyncio.Semaphore:
         if host not in self._host_sems:
-            self._host_sems[host] = asyncio.Semaphore(concurrency_per_host)
+            self._host_sems[host] = asyncio.Semaphore(self._concurrency_per_host)
         return self._host_sems[host]
 
     async def _robots_for(self, base: str) -> robotparser.RobotFileParser:
@@ -111,49 +109,36 @@ class Crawler:
         self._host_last_at[host] = time.monotonic()
 
     async def _check_ssrf(self, url: str) -> None:
-        """Validate a crawler URL via the shared SSRF policy implementation."""
         await self._ssrf_guard.check(url)
 
     async def _request_with_retry(self, url: str) -> httpx.Response:
-        delay = 1.0
         for attempt in range(self._retries + 1):
             try:
                 response = await self._client.get(url, follow_redirects=False, headers=self._auth_headers)
                 if response.status_code not in (429, 503) or attempt >= self._retries:
                     return response
+
+                delay = min(2 ** attempt, 10.0) if self._backoff == "exponential" else 1.0
                 retry_after = response.headers.get("Retry-After")
-                if retry_after:
+                if self._honor_retry_after and retry_after:
                     with contextlib.suppress(ValueError):
                         delay = min(float(retry_after), 10.0)
-                if self._backoff == "exponential":
-                    delay = min(2 ** attempt, 10.0)
                 await asyncio.sleep(delay)
             except httpx.HTTPError:
                 if attempt >= self._retries:
                     raise
-                await asyncio.sleep(min(2 ** attempt, 10.0))
-        raise httpx.HTTPError(f"Request to {url} failed after {_retries} retries")
+                delay = min(2 ** attempt, 10.0) if self._backoff == "exponential" else 1.0
+                await asyncio.sleep(delay)
+
+        raise httpx.HTTPError(f"Request to {url} failed after {self._retries} retries")
 
     async def fetch(self, url: str, max_redirects: int = 5) -> httpx.Response:
-        """Fetch a URL, manually following redirects so each hop is SSRF-checked
-        before the request is made (rather than trusting httpx's auto-follow).
-        """
         current = url
         for _ in range(max_redirects + 1):
             await self._check_ssrf(current)
             parsed = urlparse(current)
-            host = parsed.netloc
-            await self._wait_for_rps(host)
+            await self._wait_for_rps(parsed.netloc)
             resp = await self._request_with_retry(current)
-
-            if resp.status_code in (429, 503):
-                ra = resp.headers.get("Retry-After")
-                if ra:
-                    with contextlib.suppress(Exception):
-                        delay = float(ra)
-                        await asyncio.sleep(min(delay, 10.0))
-                        await self._check_ssrf(current)
-                        resp = await self._request_with_retry(current)
 
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location")
@@ -161,10 +146,8 @@ class Crawler:
                     return resp
                 current = urljoin(current, location)
                 continue
-
             return resp
 
-        # Exhausted redirect budget; return the last response as-is.
         return resp
 
     async def discover_sitemap(self, base: str) -> Set[str]:
@@ -193,42 +176,30 @@ class Crawler:
                 links.append(urljoin(base_url, action))
         return links
 
-    async def crawl(
-        self,
-        seeds: Iterable[str],
-        include: Iterable[str],
-        exclude: Iterable[str],
-        max_pages: int = 1000,
-        use_sitemap: bool = True,
-    ) -> Set[str]:
+    async def crawl(self, seeds: Iterable[str], include: Iterable[str], exclude: Iterable[str], max_pages: int = 1000, use_sitemap: bool = True) -> Set[str]:
         seen: Set[str] = set()
         queue: asyncio.Queue[str] = asyncio.Queue()
         for s in seeds:
             await queue.put(s)
             if use_sitemap:
                 with contextlib.suppress(Exception):
-                    sm = await self.discover_sitemap(s)
-                    for u in sm:
+                    for u in await self.discover_sitemap(s):
                         await queue.put(u)
 
         async def worker():
             while True:
                 url = await queue.get()
                 try:
-                    if url in seen or len(seen) >= max_pages:
-                        continue
-                    if not self.in_scope(url, include, exclude):
+                    if url in seen or len(seen) >= max_pages or not self.in_scope(url, include, exclude):
                         continue
                     try:
                         if not await self.allowed(url):
                             continue
                         parsed = urlparse(url)
-                        host_sem = self._host_sem(parsed.netloc, self._concurrency_per_host)
-                        async with self._global_sem, host_sem:
+                        async with self._global_sem, self._host_sem(parsed.netloc):
                             resp = await self.fetch(url)
                             seen.add(url)
-                            ctype = resp.headers.get("content-type", "").lower()
-                            if "html" in ctype and resp.text:
+                            if "html" in resp.headers.get("content-type", "").lower() and resp.text:
                                 for link in self._extract_links(url, resp.text):
                                     if link not in seen:
                                         await queue.put(link)
@@ -239,9 +210,7 @@ class Crawler:
 
         workers = [asyncio.create_task(worker()) for _ in range(5)]
         await queue.join()
-        for w in workers:
-            w.cancel()
-        # Ensure cancelled workers are awaited to avoid bubbling CancelledError
+        for worker_task in workers:
+            worker_task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
         return seen
-

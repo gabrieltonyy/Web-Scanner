@@ -34,12 +34,10 @@ class AuthConfig(BaseModel):
     def request_headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {}
         if self.method == "cookies" and self.cookies:
-            for part in self.cookies.split(";"):
-                if "=" not in part:
-                    continue
-                name, value = part.strip().split("=", 1)
-                if name:
-                    headers[name] = value
+            # Cookies must be sent in one Cookie header, not as arbitrary headers.
+            cookie_parts = [part.strip() for part in self.cookies.split(";") if "=" in part]
+            if cookie_parts:
+                headers["Cookie"] = "; ".join(cookie_parts)
 
         if self.method == "basic" and self.basic:
             username = self.basic.get("username", "")
@@ -134,7 +132,6 @@ class ReportConfig(BaseModel):
     filename: str = "report.pdf"
     engine: str = DEFAULT_ENGINE
     template: str = "reporting/templates/report.html"
-    # Optional presentation metadata
     title: Optional[str] = None
     client: Optional[str] = None
     assessor: Optional[str] = None
@@ -223,7 +220,6 @@ def _interpolate_env(data: Any) -> Any:
     if isinstance(data, list):
         return [_interpolate_env(v) for v in data]
     if isinstance(data, str):
-        # Simple ${VAR} replacement via environment
         return os.path.expandvars(data)
     return data
 
@@ -235,4 +231,3 @@ def load_config(path: str) -> Config:
         raw = yaml.safe_load(f) or {}
     raw = _interpolate_env(raw)
     return Config(**raw)
-
