@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 class Orchestrator:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self._auth_headers = cfg.auth.request_headers
+        self._proxy_map = cfg.proxies.as_httpx_proxies if cfg.proxies else None
         self._ssrf_guard = SSRFGuard(
             enabled=cfg.safety.ssrf_protection,
             blocklist_cidrs=cfg.safety.blocklist_cidrs,
@@ -48,6 +50,10 @@ class Orchestrator:
             ssrf_protection=self.cfg.safety.ssrf_protection,
             blocklist_cidrs=self.cfg.safety.blocklist_cidrs,
             blocklist_hosts=self.cfg.safety.blocklist_hosts,
+            auth_headers=self._auth_headers,
+            proxies=self._proxy_map,
+            retries=self.cfg.runtime.retries,
+            backoff=self.cfg.runtime.backoff,
         )
         try:
             urls = await c.crawl(
@@ -63,7 +69,7 @@ class Orchestrator:
 
     async def passive_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
         findings: List[Finding] = []
-        r = await self._ssrf_guard.get(client, url)
+        r = await self._ssrf_guard.get(client, url, headers=self._auth_headers)
         hdrs = dict(r.headers)
         if self.cfg.checks.misconfig:
             findings.extend(check_security_headers(url, hdrs))
@@ -77,21 +83,58 @@ class Orchestrator:
 
     async def active_checks_for(self, url: str, client: httpx.AsyncClient) -> List[Finding]:
         findings: List[Finding] = []
-        findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://"), ssrf_guard=self._ssrf_guard))
-        findings.extend(await check_sqli(url, client, safe_mode=self.cfg.safety.safe_mode, ssrf_guard=self._ssrf_guard))
+        findings.extend(
+            await check_reflected_xss(
+                url,
+                client,
+                https=url.startswith("https://"),
+                ssrf_guard=self._ssrf_guard,
+                headers=self._auth_headers,
+            )
+        )
+        findings.extend(
+            await check_sqli(
+                url,
+                client,
+                safe_mode=self.cfg.safety.safe_mode,
+                ssrf_guard=self._ssrf_guard,
+                headers=self._auth_headers,
+            )
+        )
         return findings
 
     async def run(self) -> dict:
         urls = await self.crawl()
         findings: List[Finding] = []
-        async with httpx.AsyncClient(follow_redirects=False, timeout=self.cfg.runtime.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=self.cfg.runtime.timeout_seconds,
+            proxies=self._proxy_map,
+            headers=self._auth_headers,
+        ) as client:
             for url in urls:
                 try:
                     findings.extend(await self.passive_checks_for(url, client))
                     if self.cfg.checks.xss:
-                        findings.extend(await check_reflected_xss(url, client, https=url.startswith("https://"), ssrf_guard=self._ssrf_guard))
+                        findings.extend(
+                            await check_reflected_xss(
+                                url,
+                                client,
+                                https=url.startswith("https://"),
+                                ssrf_guard=self._ssrf_guard,
+                                headers=self._auth_headers,
+                            )
+                        )
                     if self.cfg.checks.sqli:
-                        findings.extend(await check_sqli(url, client, safe_mode=self.cfg.safety.safe_mode, ssrf_guard=self._ssrf_guard))
+                        findings.extend(
+                            await check_sqli(
+                                url,
+                                client,
+                                safe_mode=self.cfg.safety.safe_mode,
+                                ssrf_guard=self._ssrf_guard,
+                                headers=self._auth_headers,
+                            )
+                        )
                 except SSRFBlocked as exc:
                     logger.warning("Skipped blocked URL during checks: %s", exc)
                 except Exception:
@@ -210,3 +253,4 @@ async def run_scan(config_path: str, dangerous: bool = False) -> dict:
         cfg.safety.safe_mode = False
     orch = Orchestrator(cfg)
     return await orch.run()
+

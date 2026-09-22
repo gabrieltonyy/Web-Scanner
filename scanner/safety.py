@@ -84,12 +84,13 @@ class SSRFGuard:
         client: httpx.AsyncClient,
         url: str,
         max_redirects: int = 5,
+        headers: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
         """GET a URL while validating each destination before it is requested."""
         current = url
         for _ in range(max_redirects + 1):
             await self.check(current)
-            response = await client.get(current, follow_redirects=False)
+            response = await client.get(current, follow_redirects=False, headers=headers)
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response
             location = response.headers.get("Location")
@@ -127,3 +128,4 @@ def is_url_blocked(target_host_ip: str, blocklist_cidrs: Iterable[str], blocklis
             if hn == h.lower():
                 return True
     return False
+

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import List, Optional
-from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -42,6 +41,7 @@ async def check_sqli(
     client: httpx.AsyncClient,
     safe_mode: bool = True,
     ssrf_guard: Optional[SSRFGuard] = None,
+    headers: Optional[dict[str, str]] = None,
 ) -> List[Finding]:
     findings: List[Finding] = []
     parsed = urlparse(url)
@@ -56,7 +56,10 @@ async def check_sqli(
     for name in params.keys():
         for payload in payloads:
             test_url = _inject_param(url, name, params[name] + payload if params[name] else payload)
-            r = await ssrf_guard.get(client, test_url) if ssrf_guard else await client.get(test_url)
+            if ssrf_guard:
+                r = await ssrf_guard.get(client, test_url, headers=headers)
+            else:
+                r = await client.get(test_url, headers=headers)
             body = r.text or ""
             if SQL_ERROR_RE.search(body):
                 snippet = body[:500]
@@ -76,8 +79,9 @@ async def check_sqli(
                         response=HTTPResponse(status=r.status_code, headers=dict(r.headers), body_excerpt=None),
                         evidence=Evidence(type="error", value="SQL error pattern detected", match_context=snippet, signature="sql-error"),
                         remediation="Use parameterized queries / prepared statements. Validate and sanitize inputs. Avoid building SQL with string concatenation.",
-                        references=["https://owasp.org/www-community/attacks/SQL_Injection"]
+                        references=["https://owasp.org/www-community/attacks/SQL_Injection"],
                     )
                 )
                 break
     return findings
+

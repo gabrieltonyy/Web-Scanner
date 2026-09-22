@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import List, Optional
-from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 
 import httpx
 
@@ -10,6 +9,8 @@ from ..safety import SSRFGuard
 
 
 def _inject_param(url: str, param: str, value: str) -> str:
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
     parsed = urlparse(url)
     q = dict(parse_qsl(parsed.query, keep_blank_values=True))
     q[param] = value
@@ -22,8 +23,11 @@ async def check_reflected_xss(
     client: httpx.AsyncClient,
     https: bool = False,
     ssrf_guard: Optional[SSRFGuard] = None,
+    headers: Optional[dict[str, str]] = None,
 ) -> List[Finding]:
     findings: List[Finding] = []
+    from urllib.parse import parse_qsl, urlparse
+
     parsed = urlparse(url)
     params = dict(parse_qsl(parsed.query, keep_blank_values=True))
     if not params:
@@ -32,7 +36,10 @@ async def check_reflected_xss(
     for name in params.keys():
         marker = f"<xss-{name}-123>"
         test_url = _inject_param(url, name, marker)
-        r = await ssrf_guard.get(client, test_url) if ssrf_guard else await client.get(test_url)
+        if ssrf_guard:
+            r = await ssrf_guard.get(client, test_url, headers=headers)
+        else:
+            r = await client.get(test_url, headers=headers)
         ctype = r.headers.get("content-type", "").lower()
         if "html" not in ctype:
             # still check but deprioritize
@@ -62,7 +69,8 @@ async def check_reflected_xss(
                         "Properly encode untrusted input in HTML (escape <, >, \", ', /). "
                         "Use template autoescaping and a strict Content-Security-Policy."
                     ),
-                    references=["https://owasp.org/www-community/attacks/xss/"]
+                    references=["https://owasp.org/www-community/attacks/xss/"],
                 )
             )
     return findings
+

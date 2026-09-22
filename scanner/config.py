@@ -23,10 +23,53 @@ class AuthConfig(BaseModel):
     login_script: Optional[str] = None
     login_script_timeout: int = 30
 
+    @validator("method")
+    def validate_method(cls, value: str) -> str:
+        allowed = {"none", "basic", "cookies", "bearer"}
+        if value not in allowed:
+            raise ValueError(f"auth.method must be one of {sorted(allowed)}")
+        return value
+
+    @property
+    def request_headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        if self.method == "cookies" and self.cookies:
+            for part in self.cookies.split(";"):
+                if "=" not in part:
+                    continue
+                name, value = part.strip().split("=", 1)
+                if name:
+                    headers[name] = value
+
+        if self.method == "basic" and self.basic:
+            username = self.basic.get("username", "")
+            password = self.basic.get("password", "")
+            if username or password:
+                import base64
+
+                token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+                headers["Authorization"] = f"Basic {token}"
+
+        if self.method == "bearer" and self.bearer:
+            token = self.bearer.get("token") or self.bearer.get("value")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+        return headers
+
 
 class ProxyConfig(BaseModel):
     http: Optional[str] = None
     https: Optional[str] = None
+
+    @property
+    def as_httpx_proxies(self) -> Optional[Dict[str, str]]:
+        proxies: Dict[str, str] = {}
+        if self.http:
+            proxies["http"] = self.http
+        if self.https:
+            proxies["https"] = self.https
+        return proxies or None
 
 
 class CrawlerConfig(BaseModel):
@@ -101,6 +144,13 @@ class ReportConfig(BaseModel):
     methodology: Optional[str] = None
     assumptions: Optional[str] = None
 
+    @validator("engine")
+    def validate_engine(cls, value: str) -> str:
+        allowed = {"weasyprint", "wkhtmltopdf", "reportlab"}
+        if value not in allowed:
+            raise ValueError(f"report.engine must be one of {sorted(allowed)}")
+        return value
+
 
 class RuntimeConfig(BaseModel):
     concurrency: int = 10
@@ -108,6 +158,12 @@ class RuntimeConfig(BaseModel):
     retries: int = 2
     backoff: str = "exponential"
     honor_retry_after: bool = True
+
+    @validator("retries")
+    def validate_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("runtime.retries must be >= 0")
+        return value
 
 
 class CIConfig(BaseModel):
@@ -145,6 +201,21 @@ class Config(BaseModel):
     ui: UIConfig = UIConfig()
     env: EnvConfig = EnvConfig()
 
+    @validator("targets")
+    def validate_targets(cls, value: List[str]) -> List[str]:
+        if not value:
+            raise ValueError("config.targets must not be empty")
+        cleaned = [str(v).strip() for v in value if str(v).strip()]
+        if not cleaned:
+            raise ValueError("config.targets must contain at least one non-empty URL")
+        return cleaned
+
+    @validator("scope", pre=True)
+    def validate_scope(cls, value: Any) -> Any:
+        if value is None:
+            return {"include": [], "exclude": []}
+        return value
+
 
 def _interpolate_env(data: Any) -> Any:
     if isinstance(data, dict):
@@ -164,3 +235,4 @@ def load_config(path: str) -> Config:
         raw = yaml.safe_load(f) or {}
     raw = _interpolate_env(raw)
     return Config(**raw)
+

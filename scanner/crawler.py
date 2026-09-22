@@ -31,11 +31,20 @@ class Crawler:
         ssrf_protection: bool = True,
         blocklist_cidrs: Optional[List[str]] = None,
         blocklist_hosts: Optional[List[str]] = None,
+        auth_headers: Optional[Dict[str, str]] = None,
+        proxies: Optional[Dict[str, str]] = None,
+        retries: int = 2,
+        backoff: str = "exponential",
     ):
         # follow_redirects is intentionally False: redirects are followed manually
         # in fetch() so each hop can be checked against the SSRF blocklist before
         # the request is made.
-        self._client = httpx.AsyncClient(follow_redirects=False, timeout=timeout)
+        self._client = httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=timeout,
+            proxies=proxies,
+            headers=auth_headers,
+        )
         self._global_sem = asyncio.Semaphore(concurrency)
         self._concurrency_per_host = concurrency_per_host
         self._host_sems: Dict[str, asyncio.Semaphore] = {}
@@ -43,6 +52,9 @@ class Crawler:
         self._host_last_at: Dict[str, float] = {}
         self._per_host_interval = 1.0 / per_host_rps if per_host_rps > 0 else 0.0
         self._respect_robots = respect_robots
+        self._auth_headers = auth_headers or {}
+        self._retries = max(0, retries)
+        self._backoff = backoff
         self._ssrf_guard = SSRFGuard(
             enabled=ssrf_protection,
             blocklist_cidrs=blocklist_cidrs,
@@ -102,6 +114,26 @@ class Crawler:
         """Validate a crawler URL via the shared SSRF policy implementation."""
         await self._ssrf_guard.check(url)
 
+    async def _request_with_retry(self, url: str) -> httpx.Response:
+        delay = 1.0
+        for attempt in range(self._retries + 1):
+            try:
+                response = await self._client.get(url, follow_redirects=False, headers=self._auth_headers)
+                if response.status_code not in (429, 503) or attempt >= self._retries:
+                    return response
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    with contextlib.suppress(ValueError):
+                        delay = min(float(retry_after), 10.0)
+                if self._backoff == "exponential":
+                    delay = min(2 ** attempt, 10.0)
+                await asyncio.sleep(delay)
+            except httpx.HTTPError:
+                if attempt >= self._retries:
+                    raise
+                await asyncio.sleep(min(2 ** attempt, 10.0))
+        raise httpx.HTTPError(f"Request to {url} failed after {_retries} retries")
+
     async def fetch(self, url: str, max_redirects: int = 5) -> httpx.Response:
         """Fetch a URL, manually following redirects so each hop is SSRF-checked
         before the request is made (rather than trusting httpx's auto-follow).
@@ -112,7 +144,7 @@ class Crawler:
             parsed = urlparse(current)
             host = parsed.netloc
             await self._wait_for_rps(host)
-            resp = await self._client.get(current)
+            resp = await self._request_with_retry(current)
 
             if resp.status_code in (429, 503):
                 ra = resp.headers.get("Retry-After")
@@ -121,7 +153,7 @@ class Crawler:
                         delay = float(ra)
                         await asyncio.sleep(min(delay, 10.0))
                         await self._check_ssrf(current)
-                        resp = await self._client.get(current)
+                        resp = await self._request_with_retry(current)
 
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location")
@@ -191,7 +223,7 @@ class Crawler:
                         if not await self.allowed(url):
                             continue
                         parsed = urlparse(url)
-                        host_sem = self._host_sem(parsed.netloc, self._host_sems.get(parsed.netloc, asyncio.Semaphore(4))._value if parsed.netloc in self._host_sems else 4)
+                        host_sem = self._host_sem(parsed.netloc, self._concurrency_per_host)
                         async with self._global_sem, host_sem:
                             resp = await self.fetch(url)
                             seen.add(url)
@@ -212,3 +244,4 @@ class Crawler:
         # Ensure cancelled workers are awaited to avoid bubbling CancelledError
         await asyncio.gather(*workers, return_exceptions=True)
         return seen
+
